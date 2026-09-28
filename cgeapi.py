@@ -1,10 +1,10 @@
-import socket
+import asyncio
 import a2s
-from fastapi import FastAPI
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -14,52 +14,43 @@ app.add_middleware(
 )
 
 SERVER_IP = "169.150.249.133"
-SERVER_PORT = 22913
+SERVER_PORT = 22912
+QUERY_TIMEOUT = 3.0
+
 
 @app.get("/serverinfo")
-def get_server_info():
-    socket.setdefaulttimeout(5)
-
+async def get_server_info():
     try:
-        info = a2s.info((SERVER_IP, SERVER_PORT))
-        map_name = getattr(info, "map_name", "Unknown")
-        server_name = getattr(info, "server_name", "Unknown")
-        player_count = getattr(info, "player_count", "Unknown")
-        max_players = getattr(info, "max_players", "Unknown")
-        game = getattr(info, "game", "Unknown")
-        version = getattr(info, "version", "Unknown")
-        password_protected = getattr(info, "password_protected", False)
-
-        # Try fetching players
-        try:
-            players = a2s.players((SERVER_IP, SERVER_PORT))
-            if not players:
-                players_list = [{"name": "Unknown", "score": 0, "duration": 0}]
-            else:
-                players_list = [{"name": p.name or "Unknown", "score": p.score, "duration": p.duration} for p in players]
-        except Exception:
-            players_list = [{"name": "Unknown", "score": 0, "duration": 0}]
-
-        return JSONResponse(content={
-            "server_name": server_name,
-            "map": map_name,
-            "players": player_count,
-            "max_players": max_players,
-            "game": game,
-            "version": version,
-            "password_protected": password_protected,
-            "players_list": players_list
-        })
-
+        # 1. Fetch server info
+        info = await a2s.ainfo((SERVER_IP, SERVER_PORT), timeout=QUERY_TIMEOUT)
     except Exception:
-        # If info query fails entirely, return Unknowns
-        return JSONResponse(content={
-            "server_name": "Unknown",
-            "map": "Unknown",
-            "players": "Unknown",
-            "max_players": "Unknown",
-            "game": "Unknown",
-            "version": "Unknown",
-            "password_protected": False,
-            "players_list": [{"name": "Unknown", "score": 0, "duration": 0}]
-        }, status_code=504)
+        raise HTTPException(status_code=504, detail="Server unreachable")
+
+    is_protected = getattr(info, "password_protected", False)
+
+    players_list = []
+    try:
+        players = await a2s.aplayers((SERVER_IP, SERVER_PORT), timeout=QUERY_TIMEOUT)
+        if players:
+            players_list = [
+                {
+                    "name": p.name or "Unknown",
+                    "score": p.score,
+                    "duration": p.duration,
+                }
+                for p in players
+            ]
+    except Exception:
+        pass
+
+    return {
+        "server_name": getattr(info, "server_name", "Unknown"),
+        "map": getattr(info, "map_name", "Unknown"),
+        "players": getattr(info, "player_count", 0),
+        "max_players": getattr(info, "max_players", 0),
+        "game": getattr(info, "game", "Unknown"),
+        "version": getattr(info, "version", "Unknown"),
+        "password_protected": is_protected,
+        "status": "Private Match" if is_protected else "Public",
+        "players_list": players_list,
+    }
